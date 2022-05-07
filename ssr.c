@@ -34,6 +34,14 @@ static struct my_block_dev {
 	size_t size;
 } g_dev;
 
+struct work_bio_info {
+	struct work_struct my_work;
+	struct bio *original_bio;
+	struct bio *sect;
+	struct bio *crc;
+};
+
+struct workqueue_struct *queue;
 
 static int my_block_open(struct block_device *bdev, fmode_t mode)
 {
@@ -44,6 +52,39 @@ static void my_block_release(struct gendisk *gd, fmode_t mode)
 {
 }
 
+static void my_bio_handler(struct work_struct *work)
+{
+	struct work_bio_info *info;
+	struct page *page;
+	char *buffer;
+
+	info = container_of(work, struct work_bio_info, my_work);
+
+	page = alloc_page(GFP_NOIO);
+	bio_add_page(&info->sect[0], page, KERNEL_SECTOR_SIZE, 0);
+
+	if (info->sect[0].bi_opf == REQ_OP_WRITE) {
+		void *data = bio_data(&info->sect[0]);
+		buffer = kmap_atomic(page);
+		strcpy(buffer, data);
+		kunmap_atomic(buffer);
+	}
+
+	submit_bio_wait(&info->sect[0]);
+
+	if (info->sect[0].bi_opf == REQ_OP_READ) {
+		buffer = kmap_atomic(page);
+		kunmap_atomic(buffer);
+	}
+
+	bio_endio(info->original_bio);
+
+	bio_put(&info->sect[0]);
+	__free_page(page);
+
+	kfree(info);
+}
+
 static blk_qc_t my_submit_bio(struct bio *bio)
 {
 	/* 0 - read | 1 - write */
@@ -51,16 +92,15 @@ static blk_qc_t my_submit_bio(struct bio *bio)
 	int dir = bio_data_dir(bio);
 	struct bio *sect;
 	struct bio *crc;
-
-	pr_info("[INFO]: Called my_submit_bio\n");
+	struct work_bio_info *info;
 
 	/* alloc bios */
-	sect = bio_alloc(GFP_NOIO, ARRAY_SIZE(pdsks) * 2);
+	sect = bio_alloc(GFP_NOIO, ARRAY_SIZE(pdsks) + 2);
+	crc = bio_alloc(GFP_NOIO, 2);
 	if (sect == NULL) {
 		pr_alert("[ERROR]: Bio allocation failed!");
 		return -ENOMEM;
 	}
-	crc = &sect[2];
 
 	/* init bios */
 	for (i = 0; i < ARRAY_SIZE(pdsks); i++) {
@@ -69,13 +109,19 @@ static blk_qc_t my_submit_bio(struct bio *bio)
 		sect[i].bi_opf = dir;
 
 		crc[i].bi_disk = pdsks[i]->bd_disk;
-		crc[i].bi_iter.bi_sector = get_crc_sector(bio->bi_iter.bi_sector);
+		crc[i].bi_iter.bi_sector =
+			get_crc_sector(bio->bi_iter.bi_sector);
 		crc[i].bi_opf = dir;
 	}
 
 	/* submit sect and crc to workqueue */
+	info = kmalloc(sizeof(*info), GFP_ATOMIC);
+	info->original_bio = bio;
+	info->sect = sect;
+	info->crc = crc;
+	INIT_WORK(&info->my_work, my_bio_handler);
+	queue_work(queue, &info->my_work);
 
-	// bio_endio(bio);
 	return 0;
 }
 
@@ -146,7 +192,8 @@ static struct block_device *open_disk(char *name)
 {
 	struct block_device *bdev;
 
-	bdev = blkdev_get_by_path(name, FMODE_READ | FMODE_WRITE | FMODE_EXCL, THIS_MODULE);
+	bdev = blkdev_get_by_path(name, FMODE_READ | FMODE_WRITE | FMODE_EXCL,
+				  THIS_MODULE);
 	if (IS_ERR(bdev)) {
 		printk(KERN_ERR "blkdev_get_by_path\n");
 		return NULL;
@@ -174,6 +221,8 @@ static int __init ssr_init(void)
 	if (pdsks[1] == NULL) {
 		goto remove_block_device;
 	}
+
+	queue = create_singlethread_workqueue("myworkqueue");
 
 	return 0;
 
