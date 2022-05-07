@@ -37,8 +37,8 @@ static struct my_block_dev {
 struct work_bio_info {
 	struct work_struct my_work;
 	struct bio *original_bio;
-	struct bio **sect;
-	struct bio **crc;
+	struct bio *sect[2];
+	struct bio *crc[2];
 };
 
 struct workqueue_struct *queue;
@@ -88,37 +88,63 @@ static void my_bio_handler(struct work_struct *work)
 static blk_qc_t my_submit_bio(struct bio *bio)
 {
 	/* 0 - read | 1 - write */
-	size_t i = 0;
+	size_t i = 0, err_i = 0;
 	int dir = bio_data_dir(bio);
-	struct bio **sect = kmalloc(sizeof(*sect) * 2, GFP_ATOMIC);
-	struct bio **crc = kmalloc(sizeof(*crc) * 2, GFP_ATOMIC);
 	struct work_bio_info *info;
+
+	info = kmalloc(sizeof(*info), GFP_ATOMIC);
+	if (!info) {
+		pr_alert("[SSR-E] Failed to allocate memory for work_bio_info");
+		goto error_exit;
+	}
 
 	/* alloc bios */
 	for (i = 0; i < 2; i++) {
-		sect[i] = bio_alloc(GFP_NOIO, 1);
-		crc[i] = bio_alloc(GFP_NOIO, 1);
+		info->sect[i] = bio_alloc(GFP_NOIO, 1);
+		if (!info->sect[i]) {
+			pr_alert("[SSR-E] Failed to allocate bios");
+			goto sector_bio_alloc_failed;
+		}
+
+		info->crc[i] = bio_alloc(GFP_NOIO, 1);
+		if (!info->crc[i]) {
+			pr_alert("[SSR-E] Failed to allocate bios");
+			goto crc_bio_alloc_failed;
+		}
 	}
 
 	/* init bios */
 	for (i = 0; i < ARRAY_SIZE(pdsks); i++) {
-		sect[i]->bi_disk = pdsks[i]->bd_disk;
-		sect[i]->bi_iter.bi_sector = bio->bi_iter.bi_sector;
-		sect[i]->bi_opf = dir;
+		info->sect[i]->bi_disk = pdsks[i]->bd_disk;
+		info->sect[i]->bi_iter.bi_sector = bio->bi_iter.bi_sector;
+		info->sect[i]->bi_opf = dir;
 
-		crc[i]->bi_disk = pdsks[i]->bd_disk;
-		crc[i]->bi_iter.bi_sector =
+		info->crc[i]->bi_disk = pdsks[i]->bd_disk;
+		info->crc[i]->bi_iter.bi_sector =
 			get_crc_sector(bio->bi_iter.bi_sector);
-		crc[i]->bi_opf = dir;
+		info->crc[i]->bi_opf = dir;
 	}
 
-	/* submit sect and crc to workqueue */
-	info = kmalloc(sizeof(*info), GFP_ATOMIC);
+	/* init info and submit sect and crc to workqueue */
 	info->original_bio = bio;
-	info->sect = sect;
-	info->crc = crc;
 	INIT_WORK(&info->my_work, my_bio_handler);
 	queue_work(queue, &info->my_work);
+
+	return BLK_QC_T_NONE;
+
+crc_bio_alloc_failed:
+	bio_put(info->sect[i]);
+
+sector_bio_alloc_failed:
+	for (err_i = 0; err_i < i; err_i++) {
+		bio_put(info->sect[err_i]);
+		bio_put(info->crc[err_i]);
+	}
+
+error_exit:
+	kfree(info);
+
+	bio_endio(bio);
 
 	return BLK_QC_T_NONE;
 }
@@ -200,6 +226,12 @@ static struct block_device *open_disk(char *name)
 	return bdev;
 }
 
+static inline
+void close_disk(struct block_device *bdev)
+{
+	blkdev_put(bdev, FMODE_READ | FMODE_WRITE | FMODE_EXCL);
+}
+
 static int __init ssr_init(void)
 {
 	int err = 0;
@@ -221,8 +253,15 @@ static int __init ssr_init(void)
 	}
 
 	queue = create_singlethread_workqueue("myworkqueue");
+	if (queue == NULL) {
+		goto remove_disks;
+	}
 
 	return 0;
+
+remove_disks:
+	close_disk(pdsks[0]);
+	close_disk(pdsks[1]);
 
 remove_block_device:
 	delete_block_device(&g_dev);
@@ -230,12 +269,6 @@ remove_block_device:
 	unregister_blkdev(SSR_MAJOR, LOGICAL_DISK_NAME);
 
 	return -ENXIO;
-}
-
-static void close_disk(struct block_device *bdev)
-{
-	/* TODO 4/1: put block device */
-	blkdev_put(bdev, FMODE_READ | FMODE_WRITE | FMODE_EXCL);
 }
 
 static void __exit ssr_exit(void)
