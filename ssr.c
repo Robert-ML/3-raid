@@ -25,12 +25,15 @@
 
 #include "./ssr.h"
 
+static struct block_device *pdsks[2];
+
 static struct my_block_dev {
 	struct blk_mq_tag_set tag_set;
 	struct request_queue *queue;
 	struct gendisk *gd;
 	size_t size;
 } g_dev;
+
 
 static int my_block_open(struct block_device *bdev, fmode_t mode)
 {
@@ -43,6 +46,36 @@ static void my_block_release(struct gendisk *gd, fmode_t mode)
 
 static blk_qc_t my_submit_bio(struct bio *bio)
 {
+	/* 0 - read | 1 - write */
+	size_t i = 0;
+	int dir = bio_data_dir(bio);
+	struct bio *sect;
+	struct bio *crc;
+
+	pr_info("[INFO]: Called my_submit_bio\n");
+
+	/* alloc bios */
+	sect = bio_alloc(GFP_NOIO, ARRAY_SIZE(pdsks) * 2);
+	if (sect == NULL) {
+		pr_alert("[ERROR]: Bio allocation failed!");
+		return -ENOMEM;
+	}
+	crc = &sect[2];
+
+	/* init bios */
+	for (i = 0; i < ARRAY_SIZE(pdsks); i++) {
+		sect[i].bi_disk = pdsks[i]->bd_disk;
+		sect[i].bi_iter.bi_sector = bio->bi_iter.bi_sector;
+		sect[i].bi_opf = dir;
+
+		crc[i].bi_disk = pdsks[i]->bd_disk;
+		crc[i].bi_iter.bi_sector = get_crc_sector(bio->bi_iter.bi_sector);
+		crc[i].bi_opf = dir;
+	}
+
+	/* submit sect and crc to workqueue */
+
+	// bio_endio(bio);
 	return 0;
 }
 
@@ -109,6 +142,19 @@ static void delete_block_device(struct my_block_dev *dev)
 		blk_mq_free_tag_set(&dev->tag_set);
 }
 
+static struct block_device *open_disk(char *name)
+{
+	struct block_device *bdev;
+
+	bdev = blkdev_get_by_path(name, FMODE_READ | FMODE_WRITE | FMODE_EXCL, THIS_MODULE);
+	if (IS_ERR(bdev)) {
+		printk(KERN_ERR "blkdev_get_by_path\n");
+		return NULL;
+	}
+
+	return bdev;
+}
+
 static int __init ssr_init(void)
 {
 	int err = 0;
@@ -119,11 +165,37 @@ static int __init ssr_init(void)
 
 	create_block_device(&g_dev);
 
+	// open physical disks
+	pdsks[0] = open_disk(PHYSICAL_DISK1_NAME);
+	if (pdsks[0] == NULL) {
+		goto remove_block_device;
+	}
+	pdsks[1] = open_disk(PHYSICAL_DISK2_NAME);
+	if (pdsks[1] == NULL) {
+		goto remove_block_device;
+	}
+
 	return 0;
+
+remove_block_device:
+	delete_block_device(&g_dev);
+
+	unregister_blkdev(SSR_MAJOR, LOGICAL_DISK_NAME);
+
+	return -ENXIO;
+}
+
+static void close_disk(struct block_device *bdev)
+{
+	/* TODO 4/1: put block device */
+	blkdev_put(bdev, FMODE_READ | FMODE_WRITE | FMODE_EXCL);
 }
 
 static void __exit ssr_exit(void)
 {
+	close_disk(pdsks[0]);
+	close_disk(pdsks[1]);
+
 	delete_block_device(&g_dev);
 
 	unregister_blkdev(SSR_MAJOR, LOGICAL_DISK_NAME);

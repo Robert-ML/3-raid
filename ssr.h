@@ -21,6 +21,11 @@
 #define LOGICAL_DISK_SIZE (95 * 1024 * 1024)
 #define LOGICAL_DISK_SECTORS ((LOGICAL_DISK_SIZE) / (KERNEL_SECTOR_SIZE))
 
+#define LOGICAL_DISK_CRC_SIZE (LOGICAL_DISK_SECTORS * sizeof(uint32_t))
+#define LOGICAL_DISK_CRC_SECTORS (LOGICAL_DISK_CRC_SIZE / (KERNEL_SECTOR_SIZE))
+#define CRC_PER_SECTOR (KERNEL_SECTOR_SIZE / sizeof(uint32_t))
+#define get_crc_sector(ith_sect) (LOGICAL_DISK_SECTORS + ((ith_sect) / CRC_PER_SECTOR))
+
 /* sync data */
 #define SSR_IOCTL_SYNC 1
 
