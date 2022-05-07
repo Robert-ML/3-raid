@@ -50,9 +50,32 @@ static void my_block_release(struct gendisk *gd, fmode_t mode)
 {
 }
 
-static inline int read_from_disk(struct bio *bio)
+static void read_payload_from_disk(sector_t sector, unsigned long offset,
+				   size_t len, struct block_device *blk_dev,
+				   char *out_payload)
 {
-	return submit_bio_wait(bio);
+	struct bio *read_bio;
+	struct page *page;
+	char *buffer;
+
+	/* Set up a bio for reading from the disk. */
+	read_bio = bio_alloc(GFP_NOIO, 1);
+	read_bio->bi_disk = blk_dev->bd_disk;
+	read_bio->bi_iter.bi_sector = sector;
+	read_bio->bi_opf = REQ_OP_READ;
+	page = alloc_page(GFP_NOIO);
+	bio_add_page(read_bio, page, len, offset);
+
+	/* Do the reading. */
+	submit_bio_wait(read_bio);
+
+	/* Save the payload that was read in the page. */
+	buffer = kmap_atomic(page);
+	memcpy(out_payload + offset, buffer + offset, len);
+	kunmap_atomic(buffer);
+
+	bio_put(read_bio);
+	__free_page(page);
 }
 
 static int get_sector_from_bio(struct bio *original_bio, struct page *sect_page,
@@ -65,7 +88,7 @@ static int get_sector_from_bio(struct bio *original_bio, struct page *sect_page,
 	bio->bi_opf = REQ_OP_READ;
 	bio_add_page(bio, sect_page, PAGE_SIZE, 0);
 
-	read_from_disk(bio);
+	submit_bio_wait(bio);
 
 	bio_put(bio);
 
@@ -86,7 +109,7 @@ static uint32_t get_crc_from_bio(struct bio *original_bio,
 	bio->bi_opf = REQ_OP_READ;
 	bio_add_page(bio, crc_page, PAGE_SIZE, 0);
 
-	read_from_disk(bio);
+	submit_bio_wait(bio);
 
 	buff = kmap_atomic(crc_page);
 
@@ -99,51 +122,38 @@ static uint32_t get_crc_from_bio(struct bio *original_bio,
 	return crc;
 }
 
-static void my_bio_handler(struct work_struct *work)
+static void my_read_handler(struct work_struct *work)
 {
 	struct work_bio_info *info;
-	struct page *page;
-	char *buffer;
-	struct page *page_sect[2];
-	struct page *page_crc[2];
-	int i = 0;
 	struct bio_vec bvec;
-	struct bvec_iter iter;
+	struct bvec_iter i;
 
 	info = container_of(work, struct work_bio_info, my_work);
 
-	for (i = 0; i < ARRAY_SIZE(page_sect); i++) {
-		page_sect[i] = alloc_page(GFP_NOIO);
-		page_crc[i] = alloc_page(GFP_NOIO);
-	}
+	// Notite salvate:
+	// avem in page-uri sectoarele si crc-urile
+	// verificam fiecare sector cu CRC
+	// daca nu e ok, scriem sectorul corect iar si CRC-ul
+	// dupa, facem memcpy in pagina din bvec la informatia din paginile noastre de sector
+	// offset-ul si len-ul din paginile noastre si cele de la user (bvec) sunt corelate
 
-	bio_for_each_segment (bvec, info->original_bio, iter) {
-		for (i = 0; i < ARRAY_SIZE(page_sect); i++) {
-			get_sector_from_bio(info->original_bio, page_sect[i],
-					    pdsks[i]->bd_disk, iter);
+	bio_for_each_segment (bvec, info->original_bio, i) {
+		sector_t sector = i.bi_sector;
+		unsigned long offset = bvec.bv_offset;
+		size_t len = bvec.bv_len;
+		char payload[4096];
+		char *buffer;
 
-			get_crc_from_bio(info->original_bio, page_crc[i],
-					 pdsks[i]->bd_disk, iter);
+		/* Assume the first block device has the right data. */
+		read_payload_from_disk(sector, offset, len, pdsks[0], payload);
 
-			// avem in page-uri sectoarele si crc-urile
-
-			// verificam fiecare sector cu CRC
-
-			// daca nu e ok, scriem sectorul corect iar si CRC-ul
-
-			// dupa, facem memcpy in pagina din bvec la informatia din paginile noastre de sector
-
-			// offset-ul si len-ul din pafinile noastre si cele de la user (bvec) sunt corelate
-		}
+		/* Send the requested data back. */
+		buffer = kmap_atomic(bvec.bv_page);
+		memcpy(buffer, payload, len);
+		kunmap_atomic(buffer);
 	}
 
 	bio_endio(info->original_bio);
-
-	for (i = 0; i < ARRAY_SIZE(page_sect); i++) {
-		__free_page(page_sect[i]);
-		__free_page(page_crc[i]);
-	}
-
 	kfree(info);
 }
 
@@ -218,7 +228,7 @@ static blk_qc_t my_submit_bio(struct bio *bio)
 	if (should_write) {
 		INIT_WORK(&info->my_work, my_write_handler);
 	} else {
-		INIT_WORK(&info->my_work, my_bio_handler);
+		INIT_WORK(&info->my_work, my_read_handler);
 	}
 	queue_work(queue, &info->my_work);
 
