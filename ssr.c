@@ -37,8 +37,6 @@ static struct my_block_dev {
 struct work_bio_info {
 	struct work_struct my_work;
 	struct bio *original_bio;
-	struct bio *sect[2];
-	struct bio *crc[2];
 };
 
 struct workqueue_struct *queue;
@@ -52,35 +50,104 @@ static void my_block_release(struct gendisk *gd, fmode_t mode)
 {
 }
 
+static inline
+int read_from_disk(struct bio *bio)
+{
+	return submit_bio_wait(bio);
+}
+
+static
+int get_sector_from_bio(struct bio *original_bio, struct page *sect_page,
+		struct gendisk *bd_disk, struct bvec_iter iter)
+{
+	struct bio *bio = bio_alloc(GFP_NOIO, 1);
+
+	bio->bi_disk = bd_disk;
+	bio->bi_iter.bi_sector = iter.bi_sector;
+	bio->bi_opf = REQ_OP_READ;
+	bio_add_page(bio, sect_page, PAGE_SIZE, 0);
+
+	read_from_disk(bio);
+
+	bio_put(bio);
+
+	return 0;
+}
+
+static
+uint32_t get_crc_from_bio(struct bio *original_bio, struct page *crc_page,
+		struct gendisk *bd_disk, struct bvec_iter iter)
+{
+	uint8_t *buff;
+	uint32_t crc;
+
+	struct bio *bio = bio_alloc(GFP_NOIO, 1);
+
+	bio->bi_disk = bd_disk;
+	bio->bi_iter.bi_sector = get_crc_sector(iter.bi_sector);
+	bio->bi_opf = REQ_OP_READ;
+	bio_add_page(bio, crc_page, PAGE_SIZE, 0);
+
+	read_from_disk(bio);
+
+	buff = kmap_atomic(crc_page);
+
+	crc = ((uint32_t *)buff)[iter.bi_sector % CRC_PER_SECTOR];
+
+	kunmap_atomic(buff);
+
+	bio_put(bio);
+
+	return crc;
+}
+
 static void my_bio_handler(struct work_struct *work)
 {
 	struct work_bio_info *info;
 	struct page *page;
 	char *buffer;
+	struct page *page_sect[2];
+	struct page *page_crc[2];
+	int i = 0;
+	struct bio_vec bvec;
+	struct bvec_iter iter;
 
 	info = container_of(work, struct work_bio_info, my_work);
 
-	page = alloc_page(GFP_NOIO);
-	bio_add_page(info->sect[0], page, KERNEL_SECTOR_SIZE, 0);
-
-	if (info->sect[0]->bi_opf == REQ_OP_WRITE) {
-		void *data = bio_data(info->sect[0]);
-		buffer = kmap_atomic(page);
-		strcpy(buffer, data);
-		kunmap_atomic(buffer);
+	for (i = 0; i < ARRAY_SIZE(page_sect); i++) {
+		page_sect[i] = alloc_page(GFP_NOIO);
+		page_crc[i]  = alloc_page(GFP_NOIO);
 	}
 
-	submit_bio_wait(info->sect[0]);
 
-	if (info->sect[0]->bi_opf == REQ_OP_READ) {
-		buffer = kmap_atomic(page);
-		kunmap_atomic(buffer);
+	bio_for_each_segment(bvec, info->original_bio, iter) {
+		for (i = 0; i < ARRAY_SIZE(page_sect); i++) {
+
+			get_sector_from_bio(info->original_bio, page_sect[i],
+					pdsks[i]->bd_disk, iter);
+
+			get_crc_from_bio(info->original_bio, page_crc[i],
+					pdsks[i]->bd_disk, iter);
+
+			// avem in page-uri sectoarele si crc-urile
+
+			// verificam fiecare sector cu CRC
+
+			// daca nu e ok, scriem sectorul corect iar si CRC-ul
+
+			// dupa, facem memcpy in pagina din bvec la informatia din paginile noastre de sector
+
+			// offset-ul si len-ul din pafinile noastre si cele de la user (bvec) sunt corelate
+
+		}
 	}
 
 	bio_endio(info->original_bio);
 
-	bio_put(info->sect[0]);
-	__free_page(page);
+	for (i = 0; i < ARRAY_SIZE(page_sect); i++) {
+		__free_page(page_sect[i]);
+		__free_page(page_crc[i]);
+	}
 
 	kfree(info);
 }
@@ -98,48 +165,12 @@ static blk_qc_t my_submit_bio(struct bio *bio)
 		goto error_exit;
 	}
 
-	/* alloc bios */
-	for (i = 0; i < 2; i++) {
-		info->sect[i] = bio_alloc(GFP_NOIO, 1);
-		if (!info->sect[i]) {
-			pr_alert("[SSR-E] Failed to allocate bios");
-			goto sector_bio_alloc_failed;
-		}
-
-		info->crc[i] = bio_alloc(GFP_NOIO, 1);
-		if (!info->crc[i]) {
-			pr_alert("[SSR-E] Failed to allocate bios");
-			goto crc_bio_alloc_failed;
-		}
-	}
-
-	/* init bios */
-	for (i = 0; i < ARRAY_SIZE(pdsks); i++) {
-		info->sect[i]->bi_disk = pdsks[i]->bd_disk;
-		info->sect[i]->bi_iter.bi_sector = bio->bi_iter.bi_sector;
-		info->sect[i]->bi_opf = dir;
-
-		info->crc[i]->bi_disk = pdsks[i]->bd_disk;
-		info->crc[i]->bi_iter.bi_sector =
-			get_crc_sector(bio->bi_iter.bi_sector);
-		info->crc[i]->bi_opf = dir;
-	}
-
 	/* init info and submit sect and crc to workqueue */
 	info->original_bio = bio;
 	INIT_WORK(&info->my_work, my_bio_handler);
 	queue_work(queue, &info->my_work);
 
 	return BLK_QC_T_NONE;
-
-crc_bio_alloc_failed:
-	bio_put(info->sect[i]);
-
-sector_bio_alloc_failed:
-	for (err_i = 0; err_i < i; err_i++) {
-		bio_put(info->sect[err_i]);
-		bio_put(info->crc[err_i]);
-	}
 
 error_exit:
 	kfree(info);
