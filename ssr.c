@@ -37,8 +37,8 @@ static struct my_block_dev {
 struct work_bio_info {
 	struct work_struct my_work;
 	struct bio *original_bio;
-	struct bio *sect;
-	struct bio *crc;
+	struct bio **sect;
+	struct bio **crc;
 };
 
 struct workqueue_struct *queue;
@@ -61,25 +61,25 @@ static void my_bio_handler(struct work_struct *work)
 	info = container_of(work, struct work_bio_info, my_work);
 
 	page = alloc_page(GFP_NOIO);
-	bio_add_page(&info->sect[0], page, KERNEL_SECTOR_SIZE, 0);
+	bio_add_page(info->sect[0], page, KERNEL_SECTOR_SIZE, 0);
 
-	if (info->sect[0].bi_opf == REQ_OP_WRITE) {
-		void *data = bio_data(&info->sect[0]);
+	if (info->sect[0]->bi_opf == REQ_OP_WRITE) {
+		void *data = bio_data(info->sect[0]);
 		buffer = kmap_atomic(page);
 		strcpy(buffer, data);
 		kunmap_atomic(buffer);
 	}
 
-	submit_bio_wait(&info->sect[0]);
+	submit_bio_wait(info->sect[0]);
 
-	if (info->sect[0].bi_opf == REQ_OP_READ) {
+	if (info->sect[0]->bi_opf == REQ_OP_READ) {
 		buffer = kmap_atomic(page);
 		kunmap_atomic(buffer);
 	}
 
 	bio_endio(info->original_bio);
 
-	bio_put(&info->sect[0]);
+	bio_put(info->sect[0]);
 	__free_page(page);
 
 	kfree(info);
@@ -90,28 +90,26 @@ static blk_qc_t my_submit_bio(struct bio *bio)
 	/* 0 - read | 1 - write */
 	size_t i = 0;
 	int dir = bio_data_dir(bio);
-	struct bio *sect;
-	struct bio *crc;
+	struct bio **sect = kmalloc(sizeof(*sect) * 2, GFP_ATOMIC);
+	struct bio **crc = kmalloc(sizeof(*crc) * 2, GFP_ATOMIC);
 	struct work_bio_info *info;
 
 	/* alloc bios */
-	sect = bio_alloc(GFP_NOIO, ARRAY_SIZE(pdsks) + 2);
-	crc = bio_alloc(GFP_NOIO, 2);
-	if (sect == NULL) {
-		pr_alert("[ERROR]: Bio allocation failed!");
-		return -ENOMEM;
+	for (i = 0; i < 2; i++) {
+		sect[i] = bio_alloc(GFP_NOIO, 1);
+		crc[i] = bio_alloc(GFP_NOIO, 1);
 	}
 
 	/* init bios */
 	for (i = 0; i < ARRAY_SIZE(pdsks); i++) {
-		sect[i].bi_disk = pdsks[i]->bd_disk;
-		sect[i].bi_iter.bi_sector = bio->bi_iter.bi_sector;
-		sect[i].bi_opf = dir;
+		sect[i]->bi_disk = pdsks[i]->bd_disk;
+		sect[i]->bi_iter.bi_sector = bio->bi_iter.bi_sector;
+		sect[i]->bi_opf = dir;
 
-		crc[i].bi_disk = pdsks[i]->bd_disk;
-		crc[i].bi_iter.bi_sector =
+		crc[i]->bi_disk = pdsks[i]->bd_disk;
+		crc[i]->bi_iter.bi_sector =
 			get_crc_sector(bio->bi_iter.bi_sector);
-		crc[i].bi_opf = dir;
+		crc[i]->bi_opf = dir;
 	}
 
 	/* submit sect and crc to workqueue */
@@ -122,7 +120,7 @@ static blk_qc_t my_submit_bio(struct bio *bio)
 	INIT_WORK(&info->my_work, my_bio_handler);
 	queue_work(queue, &info->my_work);
 
-	return 0;
+	return BLK_QC_T_NONE;
 }
 
 static const struct block_device_operations my_block_ops = {
