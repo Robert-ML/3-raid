@@ -50,15 +50,13 @@ static void my_block_release(struct gendisk *gd, fmode_t mode)
 {
 }
 
-static inline
-int read_from_disk(struct bio *bio)
+static inline int read_from_disk(struct bio *bio)
 {
 	return submit_bio_wait(bio);
 }
 
-static
-int get_sector_from_bio(struct bio *original_bio, struct page *sect_page,
-		struct gendisk *bd_disk, struct bvec_iter iter)
+static int get_sector_from_bio(struct bio *original_bio, struct page *sect_page,
+			       struct gendisk *bd_disk, struct bvec_iter iter)
 {
 	struct bio *bio = bio_alloc(GFP_NOIO, 1);
 
@@ -74,9 +72,9 @@ int get_sector_from_bio(struct bio *original_bio, struct page *sect_page,
 	return 0;
 }
 
-static
-uint32_t get_crc_from_bio(struct bio *original_bio, struct page *crc_page,
-		struct gendisk *bd_disk, struct bvec_iter iter)
+static uint32_t get_crc_from_bio(struct bio *original_bio,
+				 struct page *crc_page, struct gendisk *bd_disk,
+				 struct bvec_iter iter)
 {
 	uint8_t *buff;
 	uint32_t crc;
@@ -116,18 +114,16 @@ static void my_bio_handler(struct work_struct *work)
 
 	for (i = 0; i < ARRAY_SIZE(page_sect); i++) {
 		page_sect[i] = alloc_page(GFP_NOIO);
-		page_crc[i]  = alloc_page(GFP_NOIO);
+		page_crc[i] = alloc_page(GFP_NOIO);
 	}
 
-
-	bio_for_each_segment(bvec, info->original_bio, iter) {
+	bio_for_each_segment (bvec, info->original_bio, iter) {
 		for (i = 0; i < ARRAY_SIZE(page_sect); i++) {
-
 			get_sector_from_bio(info->original_bio, page_sect[i],
-					pdsks[i]->bd_disk, iter);
+					    pdsks[i]->bd_disk, iter);
 
 			get_crc_from_bio(info->original_bio, page_crc[i],
-					pdsks[i]->bd_disk, iter);
+					 pdsks[i]->bd_disk, iter);
 
 			// avem in page-uri sectoarele si crc-urile
 
@@ -138,7 +134,6 @@ static void my_bio_handler(struct work_struct *work)
 			// dupa, facem memcpy in pagina din bvec la informatia din paginile noastre de sector
 
 			// offset-ul si len-ul din pafinile noastre si cele de la user (bvec) sunt corelate
-
 		}
 	}
 
@@ -152,11 +147,65 @@ static void my_bio_handler(struct work_struct *work)
 	kfree(info);
 }
 
+static void write_payload_to_disk(char *payload, size_t len, sector_t sector,
+				  unsigned long offset,
+				  struct block_device *blk_dev)
+{
+	struct bio *write_bio;
+	struct page *page;
+	char *buffer;
+
+	/* Set up a bio for writing to the disk. */
+	write_bio = bio_alloc(GFP_NOIO, 1);
+	write_bio->bi_disk = blk_dev->bd_disk;
+	write_bio->bi_iter.bi_sector = sector;
+	write_bio->bi_opf = REQ_OP_WRITE;
+
+	/* Write the payload to the page of the bio. */
+	page = alloc_page(GFP_NOIO);
+	bio_add_page(write_bio, page, len, offset);
+	buffer = kmap_atomic(page);
+	memcpy(buffer + offset, payload + offset, len);
+	kunmap_atomic(buffer);
+
+	/* Do the writing. */
+	submit_bio_wait(write_bio);
+
+	bio_put(write_bio);
+	__free_page(page);
+}
+
+static void my_write_handler(struct work_struct *work)
+{
+	struct work_bio_info *info;
+	struct bio_vec bvec;
+	struct bvec_iter i;
+
+	info = container_of(work, struct work_bio_info, my_work);
+
+	bio_for_each_segment (bvec, info->original_bio, i) {
+		sector_t sector = i.bi_sector;
+		unsigned long offset = bvec.bv_offset;
+		size_t len = bvec.bv_len;
+
+		/* Copy the data from the user(?). */
+		char payload[4096];
+		char *buf = kmap_atomic(bvec.bv_page);
+		memcpy(payload, buf, len);
+		kunmap_atomic(buf);
+
+		/* Write the data to both disks. */
+		write_payload_to_disk(payload, len, sector, offset, pdsks[0]);
+		write_payload_to_disk(payload, len, sector, offset, pdsks[1]);
+	}
+
+	bio_endio(info->original_bio);
+	kfree(info);
+}
+
 static blk_qc_t my_submit_bio(struct bio *bio)
 {
-	/* 0 - read | 1 - write */
-	size_t i = 0, err_i = 0;
-	int dir = bio_data_dir(bio);
+	int should_write = bio_data_dir(bio) == REQ_OP_WRITE;
 	struct work_bio_info *info;
 
 	info = kmalloc(sizeof(*info), GFP_ATOMIC);
@@ -165,18 +214,18 @@ static blk_qc_t my_submit_bio(struct bio *bio)
 		goto error_exit;
 	}
 
-	/* init info and submit sect and crc to workqueue */
 	info->original_bio = bio;
-	INIT_WORK(&info->my_work, my_bio_handler);
+	if (should_write) {
+		INIT_WORK(&info->my_work, my_write_handler);
+	} else {
+		INIT_WORK(&info->my_work, my_bio_handler);
+	}
 	queue_work(queue, &info->my_work);
 
 	return BLK_QC_T_NONE;
 
 error_exit:
-	kfree(info);
-
 	bio_endio(bio);
-
 	return BLK_QC_T_NONE;
 }
 
@@ -257,8 +306,7 @@ static struct block_device *open_disk(char *name)
 	return bdev;
 }
 
-static inline
-void close_disk(struct block_device *bdev)
+static inline void close_disk(struct block_device *bdev)
 {
 	blkdev_put(bdev, FMODE_READ | FMODE_WRITE | FMODE_EXCL);
 }
