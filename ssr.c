@@ -331,7 +331,7 @@ static int __init ssr_init(void)
 
 	create_block_device(&g_dev);
 
-	// open physical disks
+	/* open physical disks */
 	pdsks[0] = open_disk(PHYSICAL_DISK1_NAME);
 	if (pdsks[0] == NULL) {
 		goto remove_block_device;
