@@ -25,6 +25,9 @@
 
 #include "./ssr.h"
 
+#define _in
+#define _out
+
 static struct block_device *pdsks[2];
 
 static struct my_block_dev {
@@ -78,83 +81,164 @@ static void read_payload_from_disk(sector_t sector, unsigned long offset,
 	__free_page(page);
 }
 
-static int get_sector_from_bio(struct bio *original_bio, struct page *sect_page,
-			       struct gendisk *bd_disk, struct bvec_iter iter)
+/*
+ * compute_crcs_from_buffer
+ *
+ * Compute the CRCs for the passed "buffer" of length "len" and the size on
+ * which a CRC is calculated is "sector_size"
+ *
+ * @param buffer - the buffer to compute the CRCs for
+ * @param len - the length of the buffer
+ * @param sector_size - the size of the sector on which the CRC is calculated
+ * @param crcs - the array where the CRCs will be saved to
+ *
+ * Note: "crcs" Must be of length "len / sector_size"
+ */
+static void compute_crcs_from_buffer(_in char *buffer, _in const size_t len,
+					_in const size_t sector_size, _out u32 *crcs)
 {
-	struct bio *bio = bio_alloc(GFP_NOIO, 1);
+	size_t i;
 
-	bio->bi_disk = bd_disk;
-	bio->bi_iter.bi_sector = iter.bi_sector;
-	bio->bi_opf = REQ_OP_READ;
-	bio_add_page(bio, sect_page, PAGE_SIZE, 0);
-
-	submit_bio_wait(bio);
-
-	bio_put(bio);
-
-	return 0;
+	for (i = 0; i < len / sector_size; i++) {
+		crcs[i] = crc32(CRC_SEED, buffer + i * sector_size, sector_size);
+	}
 }
 
-static uint32_t get_crc_from_bio(struct bio *original_bio,
-				 struct page *crc_page, struct gendisk *bd_disk,
-				 struct bvec_iter iter)
-{
-	uint8_t *buff;
-	uint32_t crc;
-
-	struct bio *bio = bio_alloc(GFP_NOIO, 1);
-
-	bio->bi_disk = bd_disk;
-	bio->bi_iter.bi_sector = get_crc_sector(iter.bi_sector);
-	bio->bi_opf = REQ_OP_READ;
-	bio_add_page(bio, crc_page, PAGE_SIZE, 0);
-
-	submit_bio_wait(bio);
-
-	buff = kmap_atomic(crc_page);
-
-	crc = ((uint32_t *)buff)[iter.bi_sector % CRC_PER_SECTOR];
-
-	kunmap_atomic(buff);
-
-	bio_put(bio);
-
-	return crc;
-}
-
+static char payload[PAGE_SIZE];
+static char crcs[PAGE_SIZE];
+static u32 crcs_comp[PAGE_SIZE / KERNEL_SECTOR_SIZE];
+static u32 crcs_read[PAGE_SIZE / KERNEL_SECTOR_SIZE];
 static void my_read_handler(struct work_struct *work)
 {
 	struct work_bio_info *info;
 	struct bio_vec bvec;
-	struct bvec_iter i;
+	struct bvec_iter it;
+
+	size_t i;
 
 	info = container_of(work, struct work_bio_info, my_work);
 
-	// Notite salvate:
-	// avem in page-uri sectoarele si crc-urile
-	// verificam fiecare sector cu CRC
-	// daca nu e ok, scriem sectorul corect iar si CRC-ul
-	// dupa, facem memcpy in pagina din bvec la informatia din paginile noastre de sector
-	// offset-ul si len-ul din paginile noastre si cele de la user (bvec) sunt corelate
 
-	bio_for_each_segment (bvec, info->original_bio, i) {
-		sector_t sector = i.bi_sector;
-		unsigned long offset = bvec.bv_offset;
-		size_t len = bvec.bv_len;
-		char payload[4096];
-		char *buffer;
+	sector_t sector = 0;
+	size_t len = PAGE_SIZE;
+	unsigned long offset = 0;
 
-		/* Assume the first block device has the right data. */
-		read_payload_from_disk(sector, offset, len, pdsks[0], payload);
+	read_payload_from_disk(sector, offset, len, pdsks[0], payload);
 
-		/* Send the requested data back. */
-		buffer = kmap_atomic(bvec.bv_page);
-		memcpy(buffer, payload, len);
-		kunmap_atomic(buffer);
+	printk(KERN_INFO "Read sector %llu from disk:\n", sector);
+	for (i = 0; i < KERNEL_SECTOR_SIZE; ++i) {
+		printk(KERN_CONT "%02x", payload[i]);
+		if (i % 64 == 63)
+			printk(KERN_CONT "\n");
 	}
+	printk(KERN_CONT "\n");
+	printk(KERN_INFO "Read sector %llu from disk:\n", sector + 1);
+	for (i = KERNEL_SECTOR_SIZE; i < KERNEL_SECTOR_SIZE * 2; ++i) {
+		printk(KERN_CONT "%02x", payload[i]);
+		if (i % 64 == 63)
+			printk(KERN_CONT "\n");
+	}
+	printk(KERN_CONT "\n");
+
+
+	u32 crc1 = crc32(CRC_SEED, payload, KERNEL_SECTOR_SIZE);
+	u32 crc2 = crc32(CRC_SEED, payload + KERNEL_SECTOR_SIZE, KERNEL_SECTOR_SIZE);
+	u8 *p_crc1 = (u8 *)&crc1;
+	u8 *p_crc2 = (u8 *)&crc2;
+	printk(KERN_INFO "CRC1: ");
+	for(i = 0; i < 4; ++i) {
+		printk(KERN_CONT "%02x", p_crc1[i]);
+	}
+	printk(KERN_CONT "\n");
+
+	printk(KERN_INFO "CRC2: ");
+	for(i = 0; i < 4; ++i) {
+		printk(KERN_CONT "%02x", p_crc1[i]);
+	}
+	printk(KERN_CONT "\n");
+
+	sector = 194560;
+	len = PAGE_SIZE;
+	offset = 0;
+
+	read_payload_from_disk(sector, offset, len, pdsks[0], crcs);
+
+	printk(KERN_INFO "Read CRC sector %llu from disk:\n", sector);
+	for (i = 0; i < KERNEL_SECTOR_SIZE; ++i) {
+		printk(KERN_CONT "%02x", crcs[i]);
+		if (i % 32 == 31)
+			printk(KERN_CONT "\n");
+	}
+	printk(KERN_CONT "\n");
 
 	bio_endio(info->original_bio);
 	kfree(info);
+	return;
+
+	// bio_for_each_segment (bvec, info->original_bio, it) {
+	// 	sector_t sector = it.bi_sector;
+	// 	unsigned long offset = bvec.bv_offset;
+	// 	size_t len = bvec.bv_len;
+	// 	char *buffer;
+
+	// 	size_t i;
+
+	// 	pr_info("\tsector: %llu, offset: %lu, len: %u\n", sector, offset, len);
+
+	// 	sector_t crc_sector;
+	// 	unsigned long crc_index_in_sector;
+
+	// 	bool first_read_faulty = false;
+
+	// 	/* we check to not request a sector out of the disk size */
+	// 	crc_sector = get_crc_sector(sector);
+	// 	crc_sector = min(crc_sector, (u64)(LOGICAL_DISK_SECTORS + LOGICAL_DISK_CRC_SECTORS) - (PAGE_SIZE / SECTOR_SIZE));
+	// 	/*
+	// 	 * crc_index_in_sector can be used to also extract the needed CRCs from
+	// 	 * the loaded page of CRCs
+	// 	 */
+	// 	crc_index_in_sector = get_crc_offset(sector);
+
+	// 	/* Assume the first block device has the right data. */
+	// 	read_payload_from_disk(sector, offset, len, pdsks[0], payload);
+	// 	read_payload_from_disk(crc_sector, 0, PAGE_SIZE, pdsks[0], crcs);
+
+
+	// 	compute_crcs_from_buffer(payload, ARRAY_SIZE(payload), KERNEL_SECTOR_SIZE, crcs_comp);
+	// 	// pr_info("crc_index_in_sector: %lu\n", crc_index_in_sector);
+	// 	memcpy(crcs_read, &(((u32 *)crcs)[crc_index_in_sector]), ARRAY_SIZE(crcs_read));
+
+	// 	pr_info("Computed crcs (base + offset: crc_computed) :\n");
+	// 	for (i = 0; i < ARRAY_SIZE(crcs_comp); ++i) {
+	// 		printk(KERN_INFO "%llu + %lu: %u, ", crc_sector, (crc_index_in_sector + i), crcs_comp[i]);
+	// 	}
+	// 	pr_info("\n\n");
+
+	// 	pr_info("crcs read from disk (base + offset: crc_read):\n");
+	// 	for (i = 0; i < ARRAY_SIZE(crcs) / sizeof(u32); ++i) {
+	// 		printk(KERN_INFO "%llu + %u: %u, ", crc_sector, i, crcs[i]);
+	// 	}
+	// 	pr_info("\n\n");
+
+	// 	// for (i = 0; i < PAGE_SIZE / KERNEL_SECTOR_SIZE; ++i) {
+	// 	// 	pr_info("\tcrcs_comp[%u]: %u | crcs_read[%u]: %u\n", i, crcs_comp[i], i, crcs_read[i]);
+	// 	// 	if (crcs_comp[i] != crcs_read[i]) {
+	// 	// 		first_read_faulty = true;
+	// 	// 		pr_info("\t\t[NOTE]: CRC mismatch at sector %llu\n", sector + i);
+	// 	// 		// break;
+	// 	// 	}
+	// 	// }
+
+	// 	/* Send the requested data back. */
+	// 	buffer = kmap_atomic(bvec.bv_page);
+	// 	memcpy(buffer, payload, len);
+	// 	kunmap_atomic(buffer);
+
+	// 	break;
+	// }
+
+	// bio_endio(info->original_bio);
+	// kfree(info);
 }
 
 static void write_payload_to_disk(char *payload, size_t len, sector_t sector,
@@ -190,6 +274,8 @@ static void my_write_handler(struct work_struct *work)
 	struct work_bio_info *info;
 	struct bio_vec bvec;
 	struct bvec_iter i;
+
+	pr_info("my_write_handler\n");
 
 	info = container_of(work, struct work_bio_info, my_work);
 
@@ -362,6 +448,9 @@ static int __init ssr_init(void)
 		goto remove_disks;
 	}
 
+	pr_info("RUN 1\n");
+	pr_info("[INFO]: KERNEL_SECTOR_SIZE: %d | PAGE_SIZE: %ld\n", KERNEL_SECTOR_SIZE, PAGE_SIZE);
+	pr_info("[INFO]: LOGICAL_DISK_SIZE: %d | LOGICAL_DISK_SECTORS: %d\n", LOGICAL_DISK_SIZE, LOGICAL_DISK_SECTORS);
 	return 0;
 
 remove_disks:
