@@ -198,14 +198,17 @@ static void my_write_handler(struct work_struct *work)
 		unsigned long offset = bvec.bv_offset;
 		size_t len = bvec.bv_len;
 
-		u32 crc;
-		sector_t crc_sector;
-		unsigned long crc_offset;
+		sector_t crc_sector =
+			LOGICAL_DISK_SECTORS + sector / CRC_PER_SECTOR;
+		unsigned long crc_offset =
+			sizeof(u32) * (sector % CRC_PER_SECTOR);
+
+		unsigned char payload[4096];
+		unsigned char crcs[KERNEL_SECTOR_SIZE];
+		unsigned char *buffer = kmap_atomic(bvec.bv_page);
 		int i;
 
 		/* Copy the data from the user(?). */
-		unsigned char payload[4096];
-		char *buffer = kmap_atomic(bvec.bv_page);
 		memcpy(payload, buffer, len);
 		kunmap_atomic(buffer);
 
@@ -214,15 +217,17 @@ static void my_write_handler(struct work_struct *work)
 		write_payload_to_disk(payload, len, sector, offset, pdsks[1]);
 
 		/* Update the CRCs. */
-		crc = crc32(0, payload, KERNEL_SECTOR_SIZE);
-		crc_sector = LOGICAL_DISK_SECTORS + sector / CRC_PER_SECTOR;
-		crc_offset = sector % CRC_PER_SECTOR;
-		read_payload_from_disk(crc_sector, 0, len, pdsks[0], payload);
-		for (i = 0; i < CRC_PER_SECTOR; i += 1) {
-			((u32 *)payload)[i] = crc;
+		read_payload_from_disk(crc_sector, 0, KERNEL_SECTOR_SIZE,
+				       pdsks[0], crcs);
+		for (i = 0; i < len / KERNEL_SECTOR_SIZE; i += 1) {
+			u32 crc = crc32(0, payload + i * KERNEL_SECTOR_SIZE,
+					KERNEL_SECTOR_SIZE);
+			((u32 *)(crcs + crc_offset))[i] = crc;
 		}
-		write_payload_to_disk(payload, len, crc_sector, 0, pdsks[0]);
-		write_payload_to_disk(payload, len, crc_sector, 0, pdsks[1]);
+		write_payload_to_disk(crcs, sizeof(crcs), crc_sector, 0,
+				      pdsks[0]);
+		write_payload_to_disk(crcs, sizeof(crcs), crc_sector, 0,
+				      pdsks[1]);
 	}
 
 	bio_endio(info->original_bio);
