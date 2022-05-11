@@ -52,7 +52,7 @@ static void my_block_release(struct gendisk *gd, fmode_t mode)
 
 static void read_payload_from_disk(sector_t sector, unsigned long offset,
 				   size_t len, struct block_device *blk_dev,
-				   char *out_payload)
+				   void *out_payload)
 {
 	struct bio *read_bio;
 	struct page *page;
@@ -78,86 +78,7 @@ static void read_payload_from_disk(sector_t sector, unsigned long offset,
 	__free_page(page);
 }
 
-static int get_sector_from_bio(struct bio *original_bio, struct page *sect_page,
-			       struct gendisk *bd_disk, struct bvec_iter iter)
-{
-	struct bio *bio = bio_alloc(GFP_NOIO, 1);
-
-	bio->bi_disk = bd_disk;
-	bio->bi_iter.bi_sector = iter.bi_sector;
-	bio->bi_opf = REQ_OP_READ;
-	bio_add_page(bio, sect_page, PAGE_SIZE, 0);
-
-	submit_bio_wait(bio);
-
-	bio_put(bio);
-
-	return 0;
-}
-
-static uint32_t get_crc_from_bio(struct bio *original_bio,
-				 struct page *crc_page, struct gendisk *bd_disk,
-				 struct bvec_iter iter)
-{
-	uint8_t *buff;
-	uint32_t crc;
-
-	struct bio *bio = bio_alloc(GFP_NOIO, 1);
-
-	bio->bi_disk = bd_disk;
-	bio->bi_iter.bi_sector = get_crc_sector(iter.bi_sector);
-	bio->bi_opf = REQ_OP_READ;
-	bio_add_page(bio, crc_page, PAGE_SIZE, 0);
-
-	submit_bio_wait(bio);
-
-	buff = kmap_atomic(crc_page);
-
-	crc = ((uint32_t *)buff)[iter.bi_sector % CRC_PER_SECTOR];
-
-	kunmap_atomic(buff);
-
-	bio_put(bio);
-
-	return crc;
-}
-
-static void my_read_handler(struct work_struct *work)
-{
-	struct work_bio_info *info;
-	struct bio_vec bvec;
-	struct bvec_iter i;
-
-	info = container_of(work, struct work_bio_info, my_work);
-
-	// Notite salvate:
-	// avem in page-uri sectoarele si crc-urile
-	// verificam fiecare sector cu CRC
-	// daca nu e ok, scriem sectorul corect iar si CRC-ul
-	// dupa, facem memcpy in pagina din bvec la informatia din paginile noastre de sector
-	// offset-ul si len-ul din paginile noastre si cele de la user (bvec) sunt corelate
-
-	bio_for_each_segment (bvec, info->original_bio, i) {
-		sector_t sector = i.bi_sector;
-		unsigned long offset = bvec.bv_offset;
-		size_t len = bvec.bv_len;
-		char payload[4096];
-		char *buffer;
-
-		/* Assume the first block device has the right data. */
-		read_payload_from_disk(sector, offset, len, pdsks[0], payload);
-
-		/* Send the requested data back. */
-		buffer = kmap_atomic(bvec.bv_page);
-		memcpy(buffer, payload, len);
-		kunmap_atomic(buffer);
-	}
-
-	bio_endio(info->original_bio);
-	kfree(info);
-}
-
-static void write_payload_to_disk(char *payload, size_t len, sector_t sector,
+static void write_payload_to_disk(void *payload, size_t len, sector_t sector,
 				  unsigned long offset,
 				  struct block_device *blk_dev)
 {
@@ -185,6 +106,90 @@ static void write_payload_to_disk(char *payload, size_t len, sector_t sector,
 	__free_page(page);
 }
 
+static unsigned char payload[PAGE_SIZE];
+static unsigned char payload0[PAGE_SIZE];
+static unsigned char payload1[PAGE_SIZE];
+static u32 crcs[CRC_PER_SECTOR];
+static u32 crcs0[CRC_PER_SECTOR];
+static u32 crcs1[CRC_PER_SECTOR];
+
+static void my_read_handler(struct work_struct *work)
+{
+	struct work_bio_info *info;
+	struct bio_vec bvec;
+	struct bvec_iter i;
+
+	info = container_of(work, struct work_bio_info, my_work);
+
+	bio_for_each_segment (bvec, info->original_bio, i) {
+		sector_t sector = i.bi_sector;
+		unsigned long offset = bvec.bv_offset;
+		size_t len = bvec.bv_len;
+
+		sector_t crc_sector =
+			LOGICAL_DISK_SECTORS + sector / CRC_PER_SECTOR;
+
+		/* The position in the CRC sector where this page starts. */
+		unsigned long crc_start_index = sector % CRC_PER_SECTOR;
+
+		char *buffer;
+		int i;
+
+		/* Read the data and CRCs from both disks. */
+		read_payload_from_disk(sector, offset, len, pdsks[0], payload0);
+		read_payload_from_disk(sector, offset, len, pdsks[1], payload1);
+		read_payload_from_disk(crc_sector, 0, KERNEL_SECTOR_SIZE,
+				       pdsks[0], crcs0);
+		read_payload_from_disk(crc_sector, 0, KERNEL_SECTOR_SIZE,
+				       pdsks[1], crcs1);
+
+		/*
+		 * Each data sector needs to be checked against the CRC and
+		 * updated individually. We do all these updates in memory first
+		 * to avoid writing to the disk too many times.
+		 */
+		for (i = 0; i < len / KERNEL_SECTOR_SIZE; i += 1) {
+			char *sector0 = payload0 + i * KERNEL_SECTOR_SIZE;
+			char *sector1 = payload1 + i * KERNEL_SECTOR_SIZE;
+
+			u32 stored0 = crcs0[crc_start_index + i];
+			u32 real0 = crc32(0, sector0, KERNEL_SECTOR_SIZE);
+			bool bad0 = stored0 != real0;
+
+			u32 stored1 = crcs1[crc_start_index + i];
+			u32 real1 = crc32(0, sector1, KERNEL_SECTOR_SIZE);
+			bool bad1 = stored1 != real1;
+
+			if (bad0 && bad1) {
+				/* TODO: How do we signal there's an error? */
+				break;
+			} else if (bad0 && !bad1) {
+				memcpy(sector0, sector1, KERNEL_SECTOR_SIZE);
+				crcs0[crc_start_index + i] = real1;
+			} else if (bad1 && !bad0) {
+				memcpy(sector1, sector0, KERNEL_SECTOR_SIZE);
+				crcs1[crc_start_index + i] = real0;
+			}
+		}
+
+		/* Write all data back to the disk, in case they got updated. */
+		write_payload_to_disk(payload0, len, sector, offset, pdsks[0]);
+		write_payload_to_disk(payload1, len, sector, offset, pdsks[1]);
+		write_payload_to_disk(crcs0, KERNEL_SECTOR_SIZE, crc_sector, 0,
+				      pdsks[0]);
+		write_payload_to_disk(crcs1, KERNEL_SECTOR_SIZE, crc_sector, 0,
+				      pdsks[1]);
+
+		/* Send the requested data back. */
+		buffer = kmap_atomic(bvec.bv_page);
+		memcpy(buffer, payload0, len);
+		kunmap_atomic(buffer);
+	}
+
+	bio_endio(info->original_bio);
+	kfree(info);
+}
+
 static void my_write_handler(struct work_struct *work)
 {
 	struct work_bio_info *info;
@@ -200,15 +205,15 @@ static void my_write_handler(struct work_struct *work)
 
 		sector_t crc_sector =
 			LOGICAL_DISK_SECTORS + sector / CRC_PER_SECTOR;
-		unsigned long crc_offset =
-			sizeof(u32) * (sector % CRC_PER_SECTOR);
 
-		unsigned char payload[4096];
-		unsigned char crcs[KERNEL_SECTOR_SIZE];
-		unsigned char *buffer = kmap_atomic(bvec.bv_page);
+		/* The position in the CRC sector where this page starts. */
+		unsigned long crc_start_index = sector % CRC_PER_SECTOR;
+
+		unsigned char *buffer;
 		int i;
 
-		/* Copy the data from the user(?). */
+		/* Copy the data to be written. */
+		buffer = kmap_atomic(bvec.bv_page);
 		memcpy(payload, buffer, len);
 		kunmap_atomic(buffer);
 
@@ -216,17 +221,17 @@ static void my_write_handler(struct work_struct *work)
 		write_payload_to_disk(payload, len, sector, offset, pdsks[0]);
 		write_payload_to_disk(payload, len, sector, offset, pdsks[1]);
 
-		/* Update the CRCs. */
+		/* Recalculate and write the CRC for each sector of the page. */
 		read_payload_from_disk(crc_sector, 0, KERNEL_SECTOR_SIZE,
 				       pdsks[0], crcs);
 		for (i = 0; i < len / KERNEL_SECTOR_SIZE; i += 1) {
-			u32 crc = crc32(0, payload + i * KERNEL_SECTOR_SIZE,
-					KERNEL_SECTOR_SIZE);
-			((u32 *)(crcs + crc_offset))[i] = crc;
+			crcs[crc_start_index + i] =
+				crc32(0, payload + i * KERNEL_SECTOR_SIZE,
+				      KERNEL_SECTOR_SIZE);
 		}
-		write_payload_to_disk(crcs, sizeof(crcs), crc_sector, 0,
+		write_payload_to_disk(crcs, KERNEL_SECTOR_SIZE, crc_sector, 0,
 				      pdsks[0]);
-		write_payload_to_disk(crcs, sizeof(crcs), crc_sector, 0,
+		write_payload_to_disk(crcs, KERNEL_SECTOR_SIZE, crc_sector, 0,
 				      pdsks[1]);
 	}
 
