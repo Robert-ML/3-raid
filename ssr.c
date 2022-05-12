@@ -148,13 +148,6 @@ static void write_payload_to_disk(void *payload, size_t len, sector_t sector,
 	__free_page(page);
 }
 
-static unsigned char payload[PAGE_SIZE];
-static unsigned char payload0[PAGE_SIZE];
-static unsigned char payload1[PAGE_SIZE];
-static u32 crcs[CRC_PER_SECTOR];
-static u32 crcs0[CRC_PER_SECTOR];
-static u32 crcs1[CRC_PER_SECTOR];
-
 /*
  * Function to write a sector to the disk in order to repair it.
  *
@@ -282,7 +275,6 @@ static int read_and_check_disks(const struct bio_vec bvec,
 	struct page *local_page = NULL;
 	size_t data_len = bvec.bv_len;
 	size_t data_offset = bvec.bv_offset;
-	u8 *m_data;
 
 	size_t i;
 	bool was_good_data;
@@ -297,7 +289,6 @@ static int read_and_check_disks(const struct bio_vec bvec,
 	size_t crc_data_size  = KERNEL_SECTOR_SIZE * 2;
 
 	struct page *crc_page = alloc_page(GFP_NOIO);
-	u8 *m_crc_data;
 
 	/* Initially we suppose all disks are good */
 	memset(bad_disks, 0, ARRAY_SIZE(bad_disks));
@@ -398,6 +389,7 @@ static void my_read_handler(struct work_struct *work)
 	kfree(info);
 }
 
+static u32 crcs[CRC_PER_SECTOR];
 static void my_write_handler(struct work_struct *work)
 {
 	struct work_bio_info *info;
