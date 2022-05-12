@@ -182,6 +182,19 @@ static void write_to_repair_sector(struct page *data_page_good, const size_t dat
 			   blk_dev, crc_sector);
 }
 
+static void print_sector(u8 *data, sector_t sector) {
+	size_t i;
+
+	pr_info("Sector: %llu\n", sector);
+	for (i = 0; i < KERNEL_SECTOR_SIZE; i) {
+		if (i % 16 == 15)
+			pr_cont("\n");
+
+		pr_cont("%02x", data[i]);
+	}
+	pr_cont("\n");
+}
+
 /*
  * Check each SECTOR worth of bytes from the data page for CRC missmatches. If
  * a previous good data page is known, it can be passed to also repair the
