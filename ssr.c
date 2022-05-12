@@ -311,8 +311,8 @@ static int read_and_check_disks(const struct bio_vec bvec,
 		 */
 		read_page_from_disk(crc_page, crc_data_size, 0, pdsks[i], crc_sector_f);
 
-		/* if we've never found a good page, we can't repair other disks */
-		if (found_good_data == false) {
+		/* If we've never found a good page, we can't repair other disks */
+		if (unlikely(found_good_data == false)) {
 			was_good_data = check_and_repair_data(pg_to_use, data_len, data_offset, crc_page, crc_index_f,
 					NULL, 0, NULL);
 
@@ -345,7 +345,7 @@ static int read_and_check_disks(const struct bio_vec bvec,
 	/* If we have any broken disks that were not repaired, we do it now */
 
 	for (i = 0; i < ARRAY_SIZE(pdsks); ++i) {
-		if (bad_disks[i] == 0) {
+		if (likely(bad_disks[i] == 0)) {
 			continue;
 		}
 
@@ -393,7 +393,7 @@ static void my_read_handler(struct work_struct *work)
 
 		err = read_and_check_disks(bvec, sector);
 
-		if (err != 0) {
+		if (unlikely(err != 0)) {
 			both_disks_corrupted = true;
 			break;
 		}
