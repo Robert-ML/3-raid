@@ -78,13 +78,20 @@ static void read_payload_from_disk(sector_t sector, unsigned long offset,
 	__free_page(page);
 }
 
-static void write_payload_to_disk(void *payload, size_t len, sector_t sector,
-				  unsigned long offset,
-				  struct block_device *blk_dev)
+/*
+ * Reads function to perform IO. It receives an unmapped page to write the
+ * disk data to.
+ *
+ * @page   : The page where to put the read data.
+ * @blk_dev: The block device to read from.
+ * @sector : The sector of the block device to read from.
+ * @len    : The length of the data to read.
+ * @offset : The offset in the sector to read from.
+ */
+static void write_page_to_disk(struct page *page, struct block_device *blk_dev,
+				sector_t sector, const size_t len, const size_t offset)
 {
 	struct bio *write_bio;
-	struct page *page;
-	char *buffer;
 
 	/* Set up a bio for writing to the disk. */
 	write_bio = bio_alloc(GFP_NOIO, 1);
@@ -92,17 +99,29 @@ static void write_payload_to_disk(void *payload, size_t len, sector_t sector,
 	write_bio->bi_iter.bi_sector = sector;
 	write_bio->bi_opf = REQ_OP_WRITE;
 
+	bio_add_page(write_bio, page, len, offset);
+
+	submit_bio_wait(write_bio);
+
+	bio_put(write_bio);
+}
+
+static void write_payload_to_disk(void *payload, size_t len, sector_t sector,
+				  unsigned long offset,
+				  struct block_device *blk_dev)
+{
+	struct page *page;
+	u8 *buffer;
+
 	/* Write the payload to the page of the bio. */
 	page = alloc_page(GFP_NOIO);
-	bio_add_page(write_bio, page, len, offset);
 	buffer = kmap_atomic(page);
 	memcpy(buffer + offset, payload + offset, len);
 	kunmap_atomic(buffer);
 
 	/* Do the writing. */
-	submit_bio_wait(write_bio);
+	write_page_to_disk(page, len, sector, offset, blk_dev);
 
-	bio_put(write_bio);
 	__free_page(page);
 }
 
