@@ -227,10 +227,6 @@ static bool check_and_repair_data(struct page *pg_to_use, const size_t data_len,
 	m_data = kmap_atomic(pg_to_use);
 	m_crc_data = kmap_atomic(crc_page);
 
-	printk(KERN_INFO "crc_index_f: %zu | ", crc_index_f);
-	printk(KERN_CONT "Data_len: %zu | ", data_len);
-	printk(KERN_CONT "Sector nr: %u\n", data_len / KERNEL_SECTOR_SIZE);
-
 	for (i = 0; i < data_len / KERNEL_SECTOR_SIZE; ++i) {
 		/*
 		 * Calculate CRC's index in an u32 vector, taking into account if
@@ -238,7 +234,7 @@ static bool check_and_repair_data(struct page *pg_to_use, const size_t data_len,
 		 */
 		crc_index_local = (crc_index_f + i) % CRC_PER_SECTOR;
 		/* If the local CRC index is smaller than the first CRC's index, then we passed into a new sector of CRCs */
-		crc_page_offset = ((crc_index_f < crc_index_local) ? 0 : KERNEL_SECTOR_SIZE);
+		crc_page_offset = ((crc_index_f <= crc_index_local) ? 0 : KERNEL_SECTOR_SIZE);
 
 		crc_comp = crc32(CRC_SEED,
 						 m_data + data_offset + i * KERNEL_SECTOR_SIZE,
@@ -249,12 +245,11 @@ static bool check_and_repair_data(struct page *pg_to_use, const size_t data_len,
 			if (good_data_page != NULL) { /* We know a good data page */
 
 				/* Repair the broken sector */
-				((u32 *)m_crc_data)[crc_index_f + i] = crc_comp;
+				((u32 *)m_crc_data)[crc_index_f + i] = crc_stored;
 
 				kunmap_atomic(m_data);
 				kunmap_atomic(m_crc_data);
 
-				pr_info("Found CRC missmatch in sector %llu, repairing it.\n", sector + i);
 				write_to_repair_sector(good_data_page, i * KERNEL_SECTOR_SIZE,
 							crc_page, crc_page_offset, blk_dev, sector + i);
 
@@ -281,6 +276,7 @@ static int read_and_check_disks(const struct bio_vec bvec,
 
 	u8 bad_disks[ARRAY_SIZE(pdsks)];
 	bool found_good_data = false;
+	size_t good_disk_index = -1;
 
 	struct page *user_page = bvec.bv_page;
 	struct page *local_page = NULL;
@@ -322,6 +318,7 @@ static int read_and_check_disks(const struct bio_vec bvec,
 
 			if (was_good_data == true) {
 				found_good_data = true;
+				good_disk_index = i;
 				/*
 				 * We found a good page of data. We leave it to the user and
 				 * for the next checks we use a locally alocated one.
@@ -346,12 +343,15 @@ static int read_and_check_disks(const struct bio_vec bvec,
 	}
 
 	/* If we have any broken disks that were not repaired, we do it now */
+
 	for (i = 0; i < ARRAY_SIZE(pdsks); ++i) {
 		if (bad_disks[i] == 0) {
 			continue;
 		}
 
-		pr_info("Error on disk: %d\n", i);
+		read_page_from_disk(pg_to_use, data_len, data_offset, pdsks[i], sector);
+		read_page_from_disk(crc_page, crc_data_size, 0, pdsks[i], crc_sector_f);
+
 		check_and_repair_data(pg_to_use, data_len, data_offset, crc_page, crc_index_f,
 				user_page, sector, pdsks[i]);
 
