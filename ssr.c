@@ -186,7 +186,7 @@ static void print_sector(u8 *data, sector_t sector) {
 	size_t i;
 
 	pr_info("Sector: %llu\n", sector);
-	for (i = 0; i < KERNEL_SECTOR_SIZE; i) {
+	for (i = 0; i < KERNEL_SECTOR_SIZE; ++i) {
 		if (i % 16 == 15)
 			pr_cont("\n");
 
