@@ -119,6 +119,8 @@ static void my_read_handler(struct work_struct *work)
 	struct bio_vec bvec;
 	struct bvec_iter i;
 
+	bool both_disks_corrupted = false;
+
 	info = container_of(work, struct work_bio_info, my_work);
 
 	bio_for_each_segment (bvec, info->original_bio, i) {
@@ -161,7 +163,7 @@ static void my_read_handler(struct work_struct *work)
 			bool bad1 = stored1 != real1;
 
 			if (bad0 && bad1) {
-				/* TODO: How do we signal there's an error? */
+				both_disks_corrupted = true;
 				break;
 			} else if (bad0 && !bad1) {
 				memcpy(sector0, sector1, KERNEL_SECTOR_SIZE);
@@ -186,7 +188,12 @@ static void my_read_handler(struct work_struct *work)
 		kunmap_atomic(buffer);
 	}
 
-	bio_endio(info->original_bio);
+	if (unlikely(both_disks_corrupted)) {
+		bio_io_error(info->original_bio);
+	} else {
+		bio_endio(info->original_bio);
+	}
+
 	kfree(info);
 }
 
