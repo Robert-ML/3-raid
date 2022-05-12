@@ -153,7 +153,7 @@ static void my_read_handler(struct work_struct *work)
 
 	printk(KERN_INFO "CRC2: ");
 	for(i = 0; i < 4; ++i) {
-		printk(KERN_CONT "%02x", p_crc1[i]);
+		printk(KERN_CONT "%02x", p_crc2[i]);
 	}
 	printk(KERN_CONT "\n");
 
@@ -163,13 +163,13 @@ static void my_read_handler(struct work_struct *work)
 
 	read_payload_from_disk(sector, offset, len, pdsks[0], crcs);
 
-	printk(KERN_INFO "Read CRC sector %llu from disk:\n", sector);
+	pr_info("Read CRC sector %llu from disk:\n", sector);
 	for (i = 0; i < KERNEL_SECTOR_SIZE; ++i) {
-		printk(KERN_CONT "%02x", crcs[i]);
-		if (i % 32 == 31)
-			printk(KERN_CONT "\n");
+		pr_info("%02x", crcs[i]);
+		// if (i % 32 == 31)
+		// 	printk(KERN_CONT "\n");
 	}
-	printk(KERN_CONT "\n");
+	pr_info("\n");
 
 	bio_endio(info->original_bio);
 	kfree(info);
