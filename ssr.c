@@ -52,7 +52,7 @@ static void my_block_release(struct gendisk *gd, fmode_t mode)
 
 /*
  * Read function to perform IO. It receives an unmapped page to write the disk
- * data data to.
+ * data to.
  *
  * @page   : The page where to write the data.
  * @len    : The length of the data to read.
@@ -153,10 +153,10 @@ static void write_payload_to_disk(void *payload, size_t len, sector_t sector,
  *
  * @data_page_good  : Unmapped page of data that is correct.
  * @data_page_offset: The offset in the page from where to take a
- * 					KERNEL_SECTOR_SIZE worth of bytes.
+ *                  KERNEL_SECTOR_SIZE worth of bytes.
  * @crc_page_good   : Unmapped page of CRCs that was corrected.
  * @crc_page_offset : The offset in the page from where to take a
- * 					KERNEL_SECTOR_SIZE worth of bytes.
+ *                  KERNEL_SECTOR_SIZE worth of bytes.
  * @blk_dev         : The block device to write to.
  * @sector          : The sector of the block device to write to.
  *
@@ -173,19 +173,6 @@ static void write_to_repair_sector(struct page *data_page_good, const size_t dat
 			   blk_dev, sector);
 	write_page_to_disk(crc_page_good, KERNEL_SECTOR_SIZE, 0,
 			   blk_dev, crc_sector);
-}
-
-static void print_sector(u8 *data, sector_t sector) {
-	size_t i;
-
-	pr_info("Sector: %llu\n", sector);
-	for (i = 0; i < KERNEL_SECTOR_SIZE; ++i) {
-		if (i % 16 == 15)
-			pr_cont("\n");
-
-		pr_cont("%02x", data[i]);
-	}
-	pr_cont("\n");
 }
 
 /*
@@ -338,9 +325,8 @@ static int read_and_check_disks(const struct bio_vec bvec,
 	/* If we have any broken disks that were not repaired, we do it now */
 
 	for (i = 0; i < ARRAY_SIZE(pdsks); ++i) {
-		if (likely(bad_disks[i] == 0)) {
+		if (likely(bad_disks[i] == 0))
 			continue;
-		}
 
 		read_page_from_disk(pg_to_use, data_len, data_offset, pdsks[i], sector);
 		read_page_from_disk(crc_page, crc_data_size, 0, pdsks[i], crc_sector_f);
@@ -350,9 +336,8 @@ static int read_and_check_disks(const struct bio_vec bvec,
 	}
 
 out:
-	if (local_page != NULL) {
+	if (local_page != NULL)
 		__free_page(local_page);
-	}
 
 	return ret;
 }
@@ -369,7 +354,7 @@ static void my_read_handler(struct work_struct *work)
 
 	info = container_of(work, struct work_bio_info, my_work);
 
-	bio_for_each_segment (bvec, info->original_bio, i) {
+	bio_for_each_segment(bvec, info->original_bio, i) {
 		sector_t sector = i.bi_sector;
 
 		err = read_and_check_disks(bvec, sector);
@@ -380,11 +365,10 @@ static void my_read_handler(struct work_struct *work)
 		}
 	}
 
-	if (unlikely(both_disks_corrupted)) {
+	if (unlikely(both_disks_corrupted))
 		bio_io_error(info->original_bio);
-	} else {
+	else
 		bio_endio(info->original_bio);
-	}
 
 	kfree(info);
 }
@@ -398,7 +382,7 @@ static void my_write_handler(struct work_struct *work)
 
 	info = container_of(work, struct work_bio_info, my_work);
 
-	bio_for_each_segment (bvec, info->original_bio, i) {
+	bio_for_each_segment(bvec, info->original_bio, i) {
 		sector_t sector = i.bi_sector;
 		size_t data_len = bvec.bv_len;
 
@@ -447,17 +431,15 @@ static blk_qc_t my_submit_bio(struct bio *bio)
 	struct work_bio_info *info;
 
 	info = kmalloc(sizeof(*info), GFP_ATOMIC);
-	if (!info) {
-		pr_alert("[SSR-E] Failed to allocate memory for work_bio_info");
+	if (!info)
 		goto error_exit;
-	}
 
 	info->original_bio = bio;
-	if (should_write) {
+	if (should_write)
 		INIT_WORK(&info->my_work, my_write_handler);
-	} else {
+	else
 		INIT_WORK(&info->my_work, my_read_handler);
-	}
+
 	queue_work(queue, &info->my_work);
 
 	return BLK_QC_T_NONE;
@@ -483,7 +465,7 @@ static int create_block_device(struct my_block_dev *dev)
 	/* Allocate queue. */
 	dev->queue = blk_alloc_queue(NUMA_NO_NODE);
 	if (IS_ERR(dev->queue)) {
-		printk(KERN_ERR "blk_mq_init_queue: out of memory\n");
+		pr_err("blk_mq_init_queue: out of memory\n");
 		err = -ENOMEM;
 		goto out_blk_init;
 	}
@@ -493,7 +475,7 @@ static int create_block_device(struct my_block_dev *dev)
 	/* initialize the gendisk structure */
 	dev->gd = alloc_disk(SSR_NUM_MINORS);
 	if (!dev->gd) {
-		printk(KERN_ERR "alloc_disk: failure\n");
+		pr_err("alloc_disk: failure\n");
 		err = -ENOMEM;
 		goto out_alloc_disk;
 	}
@@ -537,7 +519,7 @@ static struct block_device *open_disk(char *name)
 	bdev = blkdev_get_by_path(name, FMODE_READ | FMODE_WRITE | FMODE_EXCL,
 				  THIS_MODULE);
 	if (IS_ERR(bdev)) {
-		printk(KERN_ERR "blkdev_get_by_path\n");
+		pr_err("blkdev_get_by_path\n");
 		return NULL;
 	}
 
@@ -561,18 +543,18 @@ static int __init ssr_init(void)
 
 	/* open physical disks */
 	pdsks[0] = open_disk(PHYSICAL_DISK1_NAME);
-	if (pdsks[0] == NULL) {
+	if (pdsks[0] == NULL)
 		goto remove_block_device;
-	}
+
 	pdsks[1] = open_disk(PHYSICAL_DISK2_NAME);
-	if (pdsks[1] == NULL) {
+	if (pdsks[1] == NULL)
 		goto remove_block_device;
-	}
+
 
 	queue = create_singlethread_workqueue("myworkqueue");
-	if (queue == NULL) {
+	if (queue == NULL)
 		goto remove_disks;
-	}
+
 
 	return 0;
 
