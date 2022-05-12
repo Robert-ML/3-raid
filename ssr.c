@@ -302,6 +302,7 @@ static int read_and_check_disks(const struct bio_vec bvec,
 	/* Initially we suppose all disks are good */
 	memset(bad_disks, 0, ARRAY_SIZE(bad_disks));
 
+	/* Check the sector on all the disks */
 	for (i = 0; i < ARRAY_SIZE(pdsks); ++i) {
 		/* Read the data from the disk */
 		read_page_from_disk(pg_to_use, data_len, data_offset, pdsks[i], sector);
@@ -317,6 +318,7 @@ static int read_and_check_disks(const struct bio_vec bvec,
 					NULL, 0, NULL);
 
 			if (was_good_data == true) {
+				/* We found good data so we will be able to repair the disk */
 				found_good_data = true;
 				good_disk_index = i;
 				/*
@@ -354,7 +356,6 @@ static int read_and_check_disks(const struct bio_vec bvec,
 
 		check_and_repair_data(pg_to_use, data_len, data_offset, crc_page, crc_index_f,
 				user_page, sector, pdsks[i]);
-
 	}
 
 out:
@@ -379,17 +380,6 @@ static void my_read_handler(struct work_struct *work)
 
 	bio_for_each_segment (bvec, info->original_bio, i) {
 		sector_t sector = i.bi_sector;
-		// size_t data_len = bvec.bv_len;
-		// unsigned long offset = bvec.bv_offset;
-
-		// sector_t crc_sector =
-		// 	LOGICAL_DISK_SECTORS + sector / CRC_PER_SECTOR;
-
-		// /* The position in the CRC sector where this page starts. */
-		// unsigned long crc_start_index = sector % CRC_PER_SECTOR;
-
-		// u8 *buffer;
-		// int i;
 
 		err = read_and_check_disks(bvec, sector);
 
@@ -397,56 +387,6 @@ static void my_read_handler(struct work_struct *work)
 			both_disks_corrupted = true;
 			break;
 		}
-
-		// /* Read the data and CRCs from both disks. */
-		// read_payload_from_disk(sector, offset, len, pdsks[0], payload0);
-		// read_payload_from_disk(sector, offset, len, pdsks[1], payload1);
-		// read_payload_from_disk(crc_sector, 0, KERNEL_SECTOR_SIZE,
-		// 		       pdsks[0], crcs0);
-		// read_payload_from_disk(crc_sector, 0, KERNEL_SECTOR_SIZE,
-		// 		       pdsks[1], crcs1);
-
-		// /*
-		//  * Each data sector needs to be checked against the CRC and
-		//  * updated individually. We do all these updates in memory first
-		//  * to avoid writing to the disk too many times.
-		//  */
-		// for (i = 0; i < len / KERNEL_SECTOR_SIZE; i += 1) {
-		// 	char *sector0 = payload0 + i * KERNEL_SECTOR_SIZE;
-		// 	char *sector1 = payload1 + i * KERNEL_SECTOR_SIZE;
-
-		// 	u32 stored0 = crcs0[crc_start_index + i];
-		// 	u32 real0 = crc32(0, sector0, KERNEL_SECTOR_SIZE);
-		// 	bool bad0 = stored0 != real0;
-
-		// 	u32 stored1 = crcs1[crc_start_index + i];
-		// 	u32 real1 = crc32(0, sector1, KERNEL_SECTOR_SIZE);
-		// 	bool bad1 = stored1 != real1;
-
-		// 	if (bad0 && bad1) {
-		// 		both_disks_corrupted = true;
-		// 		break;
-		// 	} else if (bad0 && !bad1) {
-		// 		memcpy(sector0, sector1, KERNEL_SECTOR_SIZE);
-		// 		crcs0[crc_start_index + i] = real1;
-		// 	} else if (bad1 && !bad0) {
-		// 		memcpy(sector1, sector0, KERNEL_SECTOR_SIZE);
-		// 		crcs1[crc_start_index + i] = real0;
-		// 	}
-		// }
-
-		// /* Write all data back to the disk, in case they got updated. */
-		// write_payload_to_disk(payload0, len, sector, offset, pdsks[0]);
-		// write_payload_to_disk(payload1, len, sector, offset, pdsks[1]);
-		// write_payload_to_disk(crcs0, KERNEL_SECTOR_SIZE, crc_sector, 0,
-		// 		      pdsks[0]);
-		// write_payload_to_disk(crcs1, KERNEL_SECTOR_SIZE, crc_sector, 0,
-		// 		      pdsks[1]);
-
-		// /* Send the requested data back. */
-		// buffer = kmap_atomic(bvec.bv_page);
-		// memcpy(buffer, payload0, len);
-		// kunmap_atomic(buffer);
 	}
 
 	if (unlikely(both_disks_corrupted)) {
