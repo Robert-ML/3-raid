@@ -228,8 +228,7 @@ static void my_write_handler(struct work_struct *work)
 
 	bio_for_each_segment (bvec, info->original_bio, i) {
 		sector_t sector = i.bi_sector;
-		unsigned long offset = bvec.bv_offset;
-		size_t len = bvec.bv_len;
+		size_t data_len = bvec.bv_len;
 
 		sector_t crc_sector =
 			LOGICAL_DISK_SECTORS + sector / CRC_PER_SECTOR;
@@ -237,30 +236,33 @@ static void my_write_handler(struct work_struct *work)
 		/* The position in the CRC sector where this page starts. */
 		unsigned long crc_start_index = sector % CRC_PER_SECTOR;
 
-		unsigned char *buffer;
+		unsigned char *data;
 		int i;
 
-		/* Copy the data to be written. */
-		buffer = kmap_atomic(bvec.bv_page);
-		memcpy(payload, buffer, len);
-		kunmap_atomic(buffer);
-
 		/* Write the data to both disks. */
-		write_payload_to_disk(payload, len, sector, offset, pdsks[0]);
-		write_payload_to_disk(payload, len, sector, offset, pdsks[1]);
+		write_page_to_disk(bvec.bv_page, data_len, bvec.bv_offset, pdsks[0], sector);
+		write_page_to_disk(bvec.bv_page, data_len, bvec.bv_offset, pdsks[1], sector);
 
 		/* Recalculate and write the CRC for each sector of the page. */
 		read_payload_from_disk(crc_sector, 0, KERNEL_SECTOR_SIZE,
 				       pdsks[0], crcs);
-		for (i = 0; i < len / KERNEL_SECTOR_SIZE; i += 1) {
+
+		/* Map the data to make its CRC. */
+		data = kmap_atomic(bvec.bv_page);
+
+		for (i = 0; i < data_len / KERNEL_SECTOR_SIZE; i += 1) {
 			crcs[crc_start_index + i] =
-				crc32(0, payload + i * KERNEL_SECTOR_SIZE,
+				crc32(0, data + i * KERNEL_SECTOR_SIZE,
 				      KERNEL_SECTOR_SIZE);
 		}
+		/* Unmap the data */
+		kunmap_atomic(data);
+
+		/* Write the updated CRCs back to both disks */
 		write_payload_to_disk(crcs, KERNEL_SECTOR_SIZE, crc_sector, 0,
-				      pdsks[0]);
+					pdsks[0]);
 		write_payload_to_disk(crcs, KERNEL_SECTOR_SIZE, crc_sector, 0,
-				      pdsks[1]);
+					pdsks[1]);
 	}
 
 	bio_endio(info->original_bio);
