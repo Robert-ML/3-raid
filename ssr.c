@@ -122,7 +122,7 @@ static void write_payload_to_disk(void *payload, size_t len, sector_t sector,
 	kunmap_atomic(buffer);
 
 	/* Do the writing. */
-	write_page_to_disk(page, len, sector, offset, blk_dev);
+	write_page_to_disk(page, len, offset, blk_dev, sector);
 
 	__free_page(page);
 }
