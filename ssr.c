@@ -79,22 +79,24 @@ static void read_payload_from_disk(sector_t sector, unsigned long offset,
 }
 
 /*
- * Reads function to perform IO. It receives an unmapped page to write the
- * disk data to.
+ * Write function to perform IO. It receives an unmapped page from which to
+ * write the disk data.
  *
- * @page   : The page where to put the read data.
- * @blk_dev: The block device to read from.
- * @sector : The sector of the block device to read from.
- * @len    : The length of the data to read.
- * @offset : The offset in the sector to read from.
+ * @page   : The page from where to take the data.
+ * @len    : The length of the data to write.
+ * @offset : The offset in the page to write from.
+ * @blk_dev: The block device to write to.
+ * @sector : The sector of the block device to write to.
  */
-static void write_page_to_disk(struct page *page, struct block_device *blk_dev,
-				sector_t sector, const size_t len, const size_t offset)
+static void write_page_to_disk(struct page *page, const size_t len,
+				const size_t offset,
+				struct block_device *blk_dev, sector_t sector)
 {
 	struct bio *write_bio;
 
 	/* Set up a bio for writing to the disk. */
 	write_bio = bio_alloc(GFP_NOIO, 1);
+
 	write_bio->bi_disk = blk_dev->bd_disk;
 	write_bio->bi_iter.bi_sector = sector;
 	write_bio->bi_opf = REQ_OP_WRITE;
